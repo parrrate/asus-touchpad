@@ -4,11 +4,10 @@ use std::{
     ops::Mul,
     os::fd::AsRawFd,
     path::Path,
-    thread,
     time::Duration,
 };
 
-use async_io::Async;
+use async_io::{Async, Timer};
 use async_signal::{Signal, Signals};
 use evdev::{
     uinput::{VirtualDevice, VirtualDeviceBuilder},
@@ -88,6 +87,31 @@ fn main() -> std::io::Result<()> {
     env_logger::builder()
         .filter_level(log::LevelFilter::Info)
         .init();
+    async_io::block_on(run_outer())?;
+    Ok(())
+}
+
+async fn run_outer() -> std::io::Result<()> {
+    let mut signals = Signals::new([Signal::Term, Signal::Quit, Signal::Int])?;
+    run_retry()
+        .race(async {
+            signals.try_next().await?;
+            Ok(())
+        })
+        .await?;
+    Ok(())
+}
+
+async fn run_retry() -> std::io::Result<()> {
+    loop {
+        if let Err(e) = run().await {
+            log::error!("{e}")
+        }
+        Timer::after(TRY_SLEEP).await;
+    }
+}
+
+async fn run() -> std::io::Result<()> {
     let mut tries = TRY_TIMES;
     let (touchpad, device_id) = loop {
         let mut touchpad = Touchpad::No;
@@ -142,7 +166,7 @@ fn main() -> std::io::Result<()> {
         if tries == 0 {
             return Err(std::io::ErrorKind::TimedOut.into());
         }
-        thread::sleep(TRY_SLEEP);
+        Timer::after(TRY_SLEEP).await;
     };
     log::info!("touchpad {touchpad}");
     log::info!("device_id {device_id}");
@@ -188,7 +212,7 @@ fn main() -> std::io::Result<()> {
         },
         touchpad,
     };
-    async_io::block_on(context.run_cancellable())?;
+    context.run().await?;
     drop(context);
     log::info!("stopped");
     Ok(())
@@ -441,16 +465,5 @@ impl Context {
         loop {
             self.step().await?
         }
-    }
-
-    async fn run_cancellable(&mut self) -> std::io::Result<()> {
-        let mut signals = Signals::new([Signal::Term, Signal::Quit, Signal::Int])?;
-        self.run()
-            .race(async {
-                signals.try_next().await?;
-                Ok(())
-            })
-            .await?;
-        Ok(())
     }
 }
